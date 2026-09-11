@@ -1,7 +1,7 @@
 # CS2-Bot-State
 
 Maintained fork of [CS2-Smarter-Bot](https://github.com/ed0ard/CS2-Smarter-Bot).
-The loaded plugin name is still `Smarter-Bot` (1.9.5).
+The loaded plugin name is still `Smarter-Bot` (1.9.6).
 
 This is a standalone plugin repo. CS2-Bot-Improver is the combined
 distribution; do not develop BotState on Improver feature branches.
@@ -12,6 +12,7 @@ Relative to upstream 1.9.4 this fork adds:
 2. Stop clearing `IsWaitingBehindFriend` / `PoliteTimer` every tick
 3. Resolve BotController usercmd suppression by reflection (live ABI 17)
 4. Per-round unique first-shot reaction delay (`EnableReactionDelay`, default 180-300ms ±5%)
+5. Optional stuck-loop break (`EnableStuckLoopBreak`): stop per-tick jump-timer wipes while stuck, skip air crouch-boost, and abandon LookAt after repeated failed unstuck bumps
 
 # Requirement
 

@@ -19,13 +19,15 @@ namespace BotState;
 public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
 {
     public override string ModuleName => "Smarter-Bot";
-    public override string ModuleVersion => "1.9.5";
+    public override string ModuleVersion => "1.9.6";
     public override string ModuleAuthor => "ed0ard & XBribo & unicbm";
     public override string ModuleDescription => "Make bots smarter";
 
     private const float NativeIdleRepathSeconds = 5.0f;
     private const float MinIdleRepathSeconds = 0.25f;
     private const float MaxIdleRepathSeconds = 30.0f;
+    private const int DefaultStuckAbandonAttempts = 2;
+    private const float StuckAbandonCooldownSeconds = 4.0f;
     private const float HurtRevealSeconds = 0.8f;
     private const float DefuseRevealSeconds = 1.5f;
     private const float DefuseHiddenSeconds = 3.5f;
@@ -70,6 +72,7 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
     private readonly Dictionary<int, bool> _stuckJumpDone = new();
     private readonly Dictionary<int, int> _stuckJumpCount = new();
     private readonly Dictionary<int, float> _stuckMaxSpeed = new();
+    private readonly Dictionary<int, float> _stuckAbandonUntil = new();
     private readonly Dictionary<int, float> _idleStartTime = new();
     private readonly Dictionary<int, float> _lastRepathTime = new();
     private readonly Dictionary<int, int> _reactionMs = new();
@@ -77,6 +80,7 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
     private readonly Dictionary<int, bool> _prevEnemyVisible = new();
     private readonly HashSet<int> _usedReactionMs = new();
     private float _idleRepathSeconds = NativeIdleRepathSeconds;
+    private int _stuckAbandonAfter = DefaultStuckAbandonAttempts;
 
     public BotStateConfig Config { get; set; } = new();
 
@@ -84,31 +88,34 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
     {
         Config = config ?? new BotStateConfig();
         Config.IdleRepath ??= new IdleRepathSettings();
-        _idleRepathSeconds = NativeIdleRepathSeconds;
-
-        if (!Config.EnableCustomIdleRepath)
-            return;
-
-        float requested = Config.IdleRepath.Seconds;
-        if (!float.IsFinite(requested) || requested <= 0f)
-        {
-            Logger.LogWarning(
-                "EnableCustomIdleRepath is enabled but IdleRepath.Seconds is invalid ({Seconds}); using native {NativeSeconds}s.",
-                requested, NativeIdleRepathSeconds);
-            return;
-        }
-
-        _idleRepathSeconds = Math.Clamp(
-            requested, MinIdleRepathSeconds, MaxIdleRepathSeconds);
-
-        if (_idleRepathSeconds != requested)
-        {
-            Logger.LogWarning(
-                "IdleRepath.Seconds {Requested}s is outside the supported range; clamped to {Effective}s.",
-                requested, _idleRepathSeconds);
-        }
-
         Config.ReactionDelay ??= new ReactionDelaySettings();
+        Config.StuckLoop ??= new StuckLoopSettings();
+        _idleRepathSeconds = NativeIdleRepathSeconds;
+        _stuckAbandonAfter = DefaultStuckAbandonAttempts;
+
+        if (Config.EnableCustomIdleRepath)
+        {
+            float requested = Config.IdleRepath.Seconds;
+            if (!float.IsFinite(requested) || requested <= 0f)
+            {
+                Logger.LogWarning(
+                    "EnableCustomIdleRepath is enabled but IdleRepath.Seconds is invalid ({Seconds}); using native {NativeSeconds}s.",
+                    requested, NativeIdleRepathSeconds);
+            }
+            else
+            {
+                _idleRepathSeconds = Math.Clamp(
+                    requested, MinIdleRepathSeconds, MaxIdleRepathSeconds);
+
+                if (_idleRepathSeconds != requested)
+                {
+                    Logger.LogWarning(
+                        "IdleRepath.Seconds {Requested}s is outside the supported range; clamped to {Effective}s.",
+                        requested, _idleRepathSeconds);
+                }
+            }
+        }
+
         var reaction = Config.ReactionDelay;
         int minMs = Math.Clamp(reaction.MinMilliseconds, 0, 2000);
         int maxMs = Math.Clamp(reaction.MaxMilliseconds, 0, 2000);
@@ -126,6 +133,16 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
         reaction.MinMilliseconds = minMs;
         reaction.MaxMilliseconds = maxMs;
         reaction.JitterPercent = jitter;
+
+        int abandon = Math.Clamp(Config.StuckLoop.AbandonAfterAttempts, 1, 8);
+        if (abandon != Config.StuckLoop.AbandonAfterAttempts)
+        {
+            Logger.LogWarning(
+                "StuckLoop.AbandonAfterAttempts {Requested} is outside 1–8; clamped to {Effective}.",
+                Config.StuckLoop.AbandonAfterAttempts, abandon);
+        }
+        Config.StuckLoop.AbandonAfterAttempts = abandon;
+        _stuckAbandonAfter = abandon;
     }
     private readonly Dictionary<int, float> _reloadInterruptCooldown = new();
     private readonly Dictionary<int, float> _fakeDefuseCooldown = new();
@@ -740,6 +757,9 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
             bool inAir = !inLadderCooldown
                     && (pawn.GroundEntity == null || !pawn.GroundEntity.IsValid);
 
+            ref bool isStuck = ref bot.IsStuck;
+            bool breakStuckLoop = Config.EnableStuckLoopBreak && isStuck;
+
             _prevInAir.TryGetValue(idx, out bool prevInAir);
             // Door Stuck Issue Fix
             if (inDoorCooldown)
@@ -759,7 +779,7 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
                 _lastForwardDir[idx] = currentFwd > 0f ? 1f : -1f;
             }
 
-            if (inAir)
+            if (inAir && !breakStuckLoop)
             {
                 if (!pawn.IsDefusing)
                 {
@@ -818,25 +838,27 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
             _cachedInAir[idx] = inAir;
             _cachedNearLadder[idx] = nearLadder;
             // Normal Un-Stuck Process
-            ref bool isStuck = ref bot.IsStuck;
             if (isStuck)
             {
                 ref bool isRunning = ref bot.IsRunning;
                 isRunning = true;
 
-                ref float jumpTimestamp = ref bot.JumpTimestamp;
-                jumpTimestamp = 0.0f;
+                if (!Config.EnableStuckLoopBreak)
+                {
+                    ref float jumpTimestamp = ref bot.JumpTimestamp;
+                    jumpTimestamp = 0.0f;
 
-                CountdownTimer stuckJumpTimer = bot.StuckJumpTimer;
+                    CountdownTimer stuckJumpTimer = bot.StuckJumpTimer;
 
-                ref float stuckduration = ref stuckJumpTimer.Duration;
-                stuckduration = 0.0f;
+                    ref float stuckduration = ref stuckJumpTimer.Duration;
+                    stuckduration = 0.0f;
 
-                ref float stucktimestamp = ref stuckJumpTimer.Timestamp;
-                stucktimestamp = Server.CurrentTime;
+                    ref float stucktimestamp = ref stuckJumpTimer.Timestamp;
+                    stucktimestamp = Server.CurrentTime;
 
-                ref float stucktimescale = ref stuckJumpTimer.Timescale;
-                stucktimescale = 1.0f;
+                    ref float stucktimescale = ref stuckJumpTimer.Timescale;
+                    stucktimescale = 1.0f;
+                }
 
                 // Manual Stuck State
                 float speed2D = MathF.Sqrt(
@@ -873,10 +895,10 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
 
                     _stuckJumpDone[idx] = true;
 
-                    int jumpCount = _stuckJumpCount.GetValueOrDefault(idx);
-                    _stuckJumpCount[idx] = jumpCount + 1;
+                    int jumpCount = _stuckJumpCount.GetValueOrDefault(idx) + 1;
+                    _stuckJumpCount[idx] = jumpCount;
 
-                    float sideSign = (jumpCount % 2 == 0) ? 1f : -1f;
+                    float sideSign = ((jumpCount - 1) % 2 == 0) ? 1f : -1f;
                     float offsetRad = 30f * MathF.PI / 180f * sideSign;
                     float baseYaw = pawn.EyeAngles.Y * MathF.PI / 180f;
                     float backYaw = baseYaw + MathF.PI + offsetRad;
@@ -895,10 +917,22 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
                     ref float repathtimescale = ref repathTimer.Timescale;
                     repathtimescale = 1.0f;
 
-                    // Reset
+                    if (Config.EnableStuckLoopBreak
+                        && jumpCount >= _stuckAbandonAfter
+                        && now >= _stuckAbandonUntil.GetValueOrDefault(idx))
+                    {
+                        AbandonStuckLook(bot);
+                        _stuckAbandonUntil[idx] = now + StuckAbandonCooldownSeconds;
+                        _stuckJumpCount[idx] = 0;
+                    }
+
+                    // Reset the bump window. With loop-break on, allow another
+                    // bump after 1-3s instead of waiting for IsStuck to clear.
                     _stuckStartTime[idx] = now;
                     _stuckStartPos[idx] = new Vector(curPos.X, curPos.Y, curPos.Z);
                     _stuckMaxSpeed[idx] = 0f;
+                    if (Config.EnableStuckLoopBreak)
+                        _stuckJumpDone[idx] = false;
                 }
             }
             else
@@ -907,7 +941,9 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
                 _stuckStartTime.Remove(idx);
                 _stuckStartPos.Remove(idx);
                 _stuckJumpDone.Remove(idx);
+                _stuckJumpCount.Remove(idx);
                 _stuckMaxSpeed.Remove(idx);
+                _stuckAbandonUntil.Remove(idx);
 
                 // Idle repath: if speed < 5 for 5s, force a repath
                 float speed2DIdle = MathF.Sqrt(
@@ -999,6 +1035,7 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
         _stuckJumpDone.Clear();
         _stuckJumpCount.Clear();
         _stuckMaxSpeed.Clear();
+        _stuckAbandonUntil.Clear();
         _idleStartTime.Clear();
         _lastRepathTime.Clear();
         _reloadInterruptCooldown.Clear();
@@ -1795,6 +1832,23 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
         }
 
         return HookResult.Continue;
+    }
+
+    private static void AbandonStuckLook(CCSBot bot)
+    {
+        ref float lookDuration = ref bot.LookAtSpotDuration;
+        lookDuration = 0f;
+
+        ref int checkedHidingSpotCount = ref bot.CheckedHidingSpotCount;
+        checkedHidingSpotCount++;
+
+        CountdownTimer repathTimer = bot.RepathTimer;
+        ref float repathduration = ref repathTimer.Duration;
+        repathduration = 0.0f;
+        ref float repathtimestamp = ref repathTimer.Timestamp;
+        repathtimestamp = Server.CurrentTime;
+        ref float repathtimescale = ref repathTimer.Timescale;
+        repathtimescale = 1.0f;
     }
 
     // Resets the Bot's look-around bookkeeping so it can reacquire threats

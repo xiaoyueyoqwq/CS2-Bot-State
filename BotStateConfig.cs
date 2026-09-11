@@ -28,10 +28,20 @@ public sealed class ReactionDelaySettings
     public float JitterPercent { get; set; } = 5f;
 }
 
+public sealed class StuckLoopSettings
+{
+    /// <summary>
+    /// After this many failed unstuck bumps in one stuck episode,
+    /// expire LookAt and skip the current hiding-spot check.
+    /// </summary>
+    [JsonPropertyName("AbandonAfterAttempts")]
+    public int AbandonAfterAttempts { get; set; } = 2;
+}
+
 public sealed class BotStateConfig : BasePluginConfig
 {
     [JsonPropertyName("ConfigVersion")]
-    public override int Version { get; set; } = 2;
+    public override int Version { get; set; } = 3;
 
     /// <summary>
     /// When false, preserve the native five-second idle-repath threshold.
@@ -52,4 +62,14 @@ public sealed class BotStateConfig : BasePluginConfig
 
     [JsonPropertyName("ReactionDelay")]
     public ReactionDelaySettings ReactionDelay { get; set; } = new();
+
+    /// <summary>
+    /// When true, stop the per-tick stuck-jump wipe and abandon an
+    /// unreachable look/hiding target after repeated failed unstuck bumps.
+    /// </summary>
+    [JsonPropertyName("EnableStuckLoopBreak")]
+    public bool EnableStuckLoopBreak { get; set; } = true;
+
+    [JsonPropertyName("StuckLoop")]
+    public StuckLoopSettings StuckLoop { get; set; } = new();
 }
