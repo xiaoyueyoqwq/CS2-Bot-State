@@ -19,7 +19,7 @@ namespace BotState;
 public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
 {
     public override string ModuleName => "Smarter-Bot";
-    public override string ModuleVersion => "1.9.4";
+    public override string ModuleVersion => "1.9.5";
     public override string ModuleAuthor => "ed0ard & XBribo & unicbm";
     public override string ModuleDescription => "Make bots smarter";
 
@@ -72,6 +72,10 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
     private readonly Dictionary<int, float> _stuckMaxSpeed = new();
     private readonly Dictionary<int, float> _idleStartTime = new();
     private readonly Dictionary<int, float> _lastRepathTime = new();
+    private readonly Dictionary<int, int> _reactionMs = new();
+    private readonly Dictionary<int, float> _fireReadyAt = new();
+    private readonly Dictionary<int, bool> _prevEnemyVisible = new();
+    private readonly HashSet<int> _usedReactionMs = new();
     private float _idleRepathSeconds = NativeIdleRepathSeconds;
 
     public BotStateConfig Config { get; set; } = new();
@@ -103,6 +107,25 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
                 "IdleRepath.Seconds {Requested}s is outside the supported range; clamped to {Effective}s.",
                 requested, _idleRepathSeconds);
         }
+
+        Config.ReactionDelay ??= new ReactionDelaySettings();
+        var reaction = Config.ReactionDelay;
+        int minMs = Math.Clamp(reaction.MinMilliseconds, 0, 2000);
+        int maxMs = Math.Clamp(reaction.MaxMilliseconds, 0, 2000);
+        if (maxMs < minMs)
+            (minMs, maxMs) = (maxMs, minMs);
+        float jitter = Math.Clamp(reaction.JitterPercent, 0f, 20f);
+        if (minMs != reaction.MinMilliseconds
+            || maxMs != reaction.MaxMilliseconds
+            || jitter != reaction.JitterPercent)
+        {
+            Logger.LogWarning(
+                "ReactionDelay clamped to {Min}–{Max}ms jitter {Jitter}%.",
+                minMs, maxMs, jitter);
+        }
+        reaction.MinMilliseconds = minMs;
+        reaction.MaxMilliseconds = maxMs;
+        reaction.JitterPercent = jitter;
     }
     private readonly Dictionary<int, float> _reloadInterruptCooldown = new();
     private readonly Dictionary<int, float> _fakeDefuseCooldown = new();
@@ -574,13 +597,11 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
             allowActive = true;
 
             ref bool isRapidFiring = ref bot.IsRapidFiring;
-            isRapidFiring = true;
+            ref float fireWeaponTimestamp = ref bot.FireWeaponTimestamp;
+            ApplyReactionDelay(idx, bot, now, ref isRapidFiring, ref fireWeaponTimestamp);
 
             ref float peripheralTimestamp = ref bot.PeripheralTimestamp;
             peripheralTimestamp = 0.0f;
-
-            ref float fireWeaponTimestamp = ref bot.FireWeaponTimestamp;
-            fireWeaponTimestamp = 0.0f;
             // Alert
             CountdownTimer alertTimer = bot.AlertTimer;
             ref float alertduration = ref alertTimer.Duration;
@@ -992,6 +1013,11 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
         _prevIsAttacking.Clear();
         _cachedInAir.Clear();
         _cachedNearLadder.Clear();
+        _reactionMs.Clear();
+        _fireReadyAt.Clear();
+        _prevEnemyVisible.Clear();
+        _usedReactionMs.Clear();
+        AssignReactionMsForAllBots();
 
         // Flash projectiles never survive a round transition; drop their tracking
         // so entity indices reused next round don't match stale decisions.
@@ -1790,6 +1816,97 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
         lookAroundStateTimestamp = 0f;
     }
     //---------------------------------------------------------------------------------------
+    private bool TryGetReactionSettings(out int minMs, out int maxMs, out float jitterFrac)
+    {
+        minMs = 180;
+        maxMs = 300;
+        jitterFrac = 0.05f;
+        if (!Config.EnableReactionDelay)
+            return false;
+
+        var settings = Config.ReactionDelay ?? new ReactionDelaySettings();
+        minMs = settings.MinMilliseconds;
+        maxMs = settings.MaxMilliseconds;
+        jitterFrac = settings.JitterPercent / 100f;
+        return true;
+    }
+
+    private void AssignReactionMsForAllBots()
+    {
+        if (!Config.EnableReactionDelay)
+            return;
+
+        foreach (var player in Utilities.FindAllEntitiesByDesignerName<CCSPlayerController>("cs_player_controller"))
+        {
+            if (!player.IsValid || !player.IsBot)
+                continue;
+            AssignReactionMs((int)player.Index);
+        }
+    }
+
+    private int AssignReactionMs(int idx)
+    {
+        if (_reactionMs.TryGetValue(idx, out int existing))
+            return existing;
+
+        if (!TryGetReactionSettings(out int minMs, out int maxMs, out _))
+            return 0;
+
+        int span = Math.Max(1, maxMs - minMs + 1);
+        int offset = _random.Next(span);
+        int chosen = minMs + offset;
+        bool unique = false;
+        for (int i = 0; i < span; i++)
+        {
+            int candidate = minMs + (offset + i) % span;
+            if (_usedReactionMs.Add(candidate))
+            {
+                chosen = candidate;
+                unique = true;
+                break;
+            }
+        }
+        if (!unique)
+            chosen = minMs + _random.Next(span);
+
+        _reactionMs[idx] = chosen;
+        return chosen;
+    }
+
+    private void ApplyReactionDelay(
+        int idx, CCSBot bot, float now, ref bool isRapidFiring, ref float fireWeaponTimestamp)
+    {
+        if (!TryGetReactionSettings(out _, out _, out float jitterFrac))
+        {
+            isRapidFiring = true;
+            fireWeaponTimestamp = 0.0f;
+            return;
+        }
+
+        int assignedMs = AssignReactionMs(idx);
+        bool visible = bot.IsEnemyVisible;
+        bool wasVisible = _prevEnemyVisible.GetValueOrDefault(idx, false);
+
+        if (visible && !wasVisible)
+        {
+            float jitter = 1f + ((float)_random.NextDouble() * 2f - 1f) * jitterFrac;
+            _fireReadyAt[idx] = now + assignedMs / 1000f * jitter;
+        }
+        else if (!visible)
+        {
+            _fireReadyAt.Remove(idx);
+        }
+
+        _prevEnemyVisible[idx] = visible;
+
+        bool delaying = false;
+        float readyAt = 0.0f;
+        if (visible && _fireReadyAt.TryGetValue(idx, out readyAt) && now < readyAt)
+            delaying = true;
+        isRapidFiring = !delaying;
+        fireWeaponTimestamp = delaying ? readyAt : 0.0f;
+    }
+
     private static void ApplyBotState(CCSPlayerController player)
     {
         var pawn = player.PlayerPawn.Value;

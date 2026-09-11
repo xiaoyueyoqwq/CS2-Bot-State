@@ -1,7 +1,7 @@
 # CS2-Bot-State
 
 Maintained fork of [CS2-Smarter-Bot](https://github.com/ed0ard/CS2-Smarter-Bot).
-The loaded plugin name is still `Smarter-Bot` (1.9.4).
+The loaded plugin name is still `Smarter-Bot` (1.9.5).
 
 This is a standalone plugin repo. CS2-Bot-Improver is the combined
 distribution; do not develop BotState on Improver feature branches.
@@ -11,8 +11,7 @@ Relative to upstream 1.9.4 this fork adds:
 1. Optional idle-repath interval (`EnableCustomIdleRepath`, default off = native 5s)
 2. Stop clearing `IsWaitingBehindFriend` / `PoliteTimer` every tick
 3. Resolve BotController usercmd suppression by reflection (live ABI 17)
-
-Further BotState changes, including reaction delay, happen in this repository.
+4. Per-round unique first-shot reaction delay (`EnableReactionDelay`, default 180-300ms ±5%)
 
 # Requirement
 
