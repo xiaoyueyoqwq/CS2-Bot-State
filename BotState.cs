@@ -1179,13 +1179,26 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
                 .InjectUsercmd(slot, buttonMask, durationMs);
         }
 
-        // Starts a cancellable persistent usercmd button suppression
+        // Starts a cancellable persistent usercmd button suppression.
+        // origin/main BotState 1.9.4 calls this, but the live BotController
+        // ABI 17 interface does not declare it. Resolve at runtime so the
+        // rest of 1.9.4 still compiles and loads against the existing API.
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static long StartUsercmdSuppression(
             object api, int slot, ulong buttonMask)
         {
-            return ((BotControllerApi.IBotControllerApi)api)
-                .StartUsercmdSuppression(slot, buttonMask);
+            var method = api.GetType().GetMethod(
+                "StartUsercmdSuppression",
+                new[] { typeof(int), typeof(ulong) });
+            if (method == null) return 0;
+            try
+            {
+                return (long)(method.Invoke(api, new object[] { slot, buttonMask }) ?? 0L);
+            }
+            catch
+            {
+                return 0;
+            }
         }
 
         // Cancels one persistent usercmd suppression by its token
@@ -1193,8 +1206,18 @@ public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
         public static bool CancelUsercmdSuppression(
             object api, int slot, long suppressionId)
         {
-            return ((BotControllerApi.IBotControllerApi)api)
-                .CancelUsercmdSuppression(slot, suppressionId);
+            var method = api.GetType().GetMethod(
+                "CancelUsercmdSuppression",
+                new[] { typeof(int), typeof(long) });
+            if (method == null) return false;
+            try
+            {
+                return (bool)(method.Invoke(api, new object[] { slot, suppressionId }) ?? false);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         // Applies the knife-slot weapon lock to one Bot
