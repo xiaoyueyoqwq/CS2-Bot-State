@@ -16,13 +16,16 @@ using System.Runtime.InteropServices;
 
 namespace BotState;
 
-public class BotState : BasePlugin
+public class BotState : BasePlugin, IPluginConfig<BotStateConfig>
 {
     public override string ModuleName => "Smarter-Bot";
     public override string ModuleVersion => "1.9.4";
     public override string ModuleAuthor => "ed0ard & XBribo & unicbm";
     public override string ModuleDescription => "Make bots smarter";
 
+    private const float NativeIdleRepathSeconds = 5.0f;
+    private const float MinIdleRepathSeconds = 0.25f;
+    private const float MaxIdleRepathSeconds = 30.0f;
     private const float HurtRevealSeconds = 0.8f;
     private const float DefuseRevealSeconds = 1.5f;
     private const float DefuseHiddenSeconds = 3.5f;
@@ -69,6 +72,38 @@ public class BotState : BasePlugin
     private readonly Dictionary<int, float> _stuckMaxSpeed = new();
     private readonly Dictionary<int, float> _idleStartTime = new();
     private readonly Dictionary<int, float> _lastRepathTime = new();
+    private float _idleRepathSeconds = NativeIdleRepathSeconds;
+
+    public BotStateConfig Config { get; set; } = new();
+
+    public void OnConfigParsed(BotStateConfig config)
+    {
+        Config = config ?? new BotStateConfig();
+        Config.IdleRepath ??= new IdleRepathSettings();
+        _idleRepathSeconds = NativeIdleRepathSeconds;
+
+        if (!Config.EnableCustomIdleRepath)
+            return;
+
+        float requested = Config.IdleRepath.Seconds;
+        if (!float.IsFinite(requested) || requested <= 0f)
+        {
+            Logger.LogWarning(
+                "EnableCustomIdleRepath is enabled but IdleRepath.Seconds is invalid ({Seconds}); using native {NativeSeconds}s.",
+                requested, NativeIdleRepathSeconds);
+            return;
+        }
+
+        _idleRepathSeconds = Math.Clamp(
+            requested, MinIdleRepathSeconds, MaxIdleRepathSeconds);
+
+        if (_idleRepathSeconds != requested)
+        {
+            Logger.LogWarning(
+                "IdleRepath.Seconds {Requested}s is outside the supported range; clamped to {Effective}s.",
+                requested, _idleRepathSeconds);
+        }
+    }
     private readonly Dictionary<int, float> _reloadInterruptCooldown = new();
     private readonly Dictionary<int, float> _fakeDefuseCooldown = new();
     private readonly Dictionary<nint, float> _fakeDefuseGuardUntil = new();
@@ -604,20 +639,6 @@ public class BotState : BasePlugin
 
             ref float sawEnemySniperTimescale = ref sawEnemySniperTimer.Timescale;
             sawEnemySniperTimescale = 1.0f;
-            // Teammate Stuck Fix
-            ref bool IsWaitingBehindFriend = ref bot.IsWaitingBehindFriend;
-            IsWaitingBehindFriend = false;
-
-            CountdownTimer politeTimer = bot.PoliteTimer;
-
-            ref float politeTimerDuration = ref politeTimer.Duration;
-            politeTimerDuration = 0.0f;
-
-            ref float politeTimerTimestamp = ref politeTimer.Timestamp;
-            politeTimerTimestamp = 0.0f;
-
-            ref float politeTimerTimescale = ref politeTimer.Timescale;
-            politeTimerTimescale = 1.0f;
 
             // Sniper Peek
             bool curIsAttacking = bot.IsAttacking;
@@ -880,7 +901,9 @@ public class BotState : BasePlugin
                     float idleElapsed = now - _idleStartTime[idx];
                     float lastRepath = _lastRepathTime.GetValueOrDefault(idx, -999f);
 
-                    if (idleElapsed >= 5f && now - lastRepath >= 5f && !curIsAttacking && !pawn.IsDefusing)
+                    if (idleElapsed >= _idleRepathSeconds
+                        && now - lastRepath >= _idleRepathSeconds
+                        && !curIsAttacking && !pawn.IsDefusing)
                     {
                         ref bool isCrouching = ref bot.IsCrouching;
                         isCrouching = false;
